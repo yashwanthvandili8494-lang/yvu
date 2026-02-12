@@ -1,0 +1,15 @@
+Flask
+PyMySQL
+WTForms
+Flask-WTF
+Flask-Mail
+coolname
+pandas
+stripe
+numpy
+Flask-Session
+Flask-CORS
+WTForms-Components
+sib-api-v3-sdk
+nltk
+gunicorn

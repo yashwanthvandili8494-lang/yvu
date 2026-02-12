@@ -1,0 +1,39 @@
+# Online Examination Proctoring System
+
+This is a Flask-based web application for online examination proctoring. It includes features for user registration, login, exam creation, and proctoring functionalities.
+
+## Features
+
+- User registration and login
+- Exam creation and management
+- Real-time proctoring with video and audio monitoring
+- Face recognition and verification
+- Eye tracking and movement detection
+- Database integration with MySQL
+
+## Installation
+
+1. Clone the repository
+2. Install dependencies: `pip install -r requirements.txt`
+3. Set up MySQL database
+4. Run the application: `python app.py`
+
+## Usage
+
+Access the application at http://localhost:5000
+
+## Technologies Used
+
+- Flask
+- MySQL
+- OpenCV
+- DeepFace
+- HTML/CSS/JavaScript
+
+## Contributing
+
+Please read CONTRIBUTING.md for details on our code of conduct and the process for submitting pull requests.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
