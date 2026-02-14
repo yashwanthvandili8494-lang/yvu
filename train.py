@@ -4,11 +4,13 @@ import json
 import math
 import random
 import re
+import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
 
 
 TOKEN_PATTERN = re.compile(r"\b[a-zA-Z0-9_]+\b")
+IDENTIFIER_PATTERN = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 def tokenize(text: str) -> list[str]:
@@ -25,6 +27,32 @@ def load_questions(csv_path: Path, label: str) -> list[tuple[str, str]]:
             question = str(row.get("q", "")).strip()
             if question:
                 rows.append((question, label))
+    return rows
+
+
+def _validate_identifier(name: str, identifier_type: str) -> None:
+    if not IDENTIFIER_PATTERN.match(name):
+        raise ValueError(f"Invalid {identifier_type}: {name!r}")
+
+
+def load_questions_from_sqlite(
+    db_path: Path,
+    table_name: str,
+    label: str,
+    question_column: str = "q",
+) -> list[tuple[str, str]]:
+    _validate_identifier(table_name, "table name")
+    _validate_identifier(question_column, "column name")
+
+    query = f"SELECT {question_column} FROM {table_name}"
+    rows = []
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(query)
+        for (question,) in cursor.fetchall():
+            text = str(question or "").strip()
+            if text:
+                rows.append((text, label))
     return rows
 
 
@@ -145,9 +173,28 @@ def train(
     metadata_out: Path,
     test_size: float,
     random_state: int,
+    sqlite_db: Path | None,
+    objective_table: str,
+    subjective_table: str,
+    question_column: str,
 ) -> None:
-    objective_rows = load_questions(objective_csv, "objective")
-    subjective_rows = load_questions(subjective_csv, "subjective")
+    if sqlite_db:
+        objective_rows = load_questions_from_sqlite(
+            db_path=sqlite_db,
+            table_name=objective_table,
+            label="objective",
+            question_column=question_column,
+        )
+        subjective_rows = load_questions_from_sqlite(
+            db_path=sqlite_db,
+            table_name=subjective_table,
+            label="subjective",
+            question_column=question_column,
+        )
+    else:
+        objective_rows = load_questions(objective_csv, "objective")
+        subjective_rows = load_questions(subjective_csv, "subjective")
+
     rows = objective_rows + subjective_rows
     if len(set(label for _, label in rows)) < 2:
         raise ValueError("Need at least two classes to train.")
@@ -163,6 +210,10 @@ def train(
     metadata = {
         "objective_csv": str(objective_csv),
         "subjective_csv": str(subjective_csv),
+        "sqlite_db": str(sqlite_db) if sqlite_db else None,
+        "objective_table": objective_table if sqlite_db else None,
+        "subjective_table": subjective_table if sqlite_db else None,
+        "question_column": question_column if sqlite_db else None,
         "train_rows": len(train_rows),
         "test_rows": len(test_rows),
         "accuracy": round(accuracy, 4),
@@ -218,6 +269,30 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="Random seed for reproducibility.",
     )
+    parser.add_argument(
+        "--sqlite-db",
+        type=Path,
+        default=None,
+        help="Optional SQLite DB path. If provided, training data is read from SQL tables instead of CSV files.",
+    )
+    parser.add_argument(
+        "--objective-table",
+        type=str,
+        default="questions",
+        help="Objective question table name (used with --sqlite-db).",
+    )
+    parser.add_argument(
+        "--subjective-table",
+        type=str,
+        default="longqa",
+        help="Subjective question table name (used with --sqlite-db).",
+    )
+    parser.add_argument(
+        "--question-column",
+        type=str,
+        default="q",
+        help="Question text column name in both tables (used with --sqlite-db).",
+    )
     return parser.parse_args()
 
 
@@ -230,4 +305,8 @@ if __name__ == "__main__":
         metadata_out=args.metadata_out,
         test_size=args.test_size,
         random_state=args.random_state,
-    )
+        sqlite_db=args.sqlite_db,
+        objective_table=args.objective_table,
+        subjective_table=args.subjective_table,
+        question_column=args.question_column,
+~    )

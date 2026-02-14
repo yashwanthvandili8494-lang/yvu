@@ -1,0 +1,55 @@
+body {
+  background-color: #000 !important;
+  color: #f5f5f5 !important;
+}
+
+a {
+  color: #7cc7ff;
+}
+
+.bg-white,
+.card,
+.modal-content,
+.table,
+.dataTables_wrapper .dataTables_filter input,
+.dataTables_wrapper .dataTables_length select,
+input,
+textarea,
+select {
+  background-color: #111 !important;
+  color: #f5f5f5 !important;
+  border-color: #2a2a2a !important;
+}
+
+.navbar,
+.navbar-theme-primary,
+.sidebar,
+.footer,
+footer {
+  background-color: #000 !important;
+}
+
+.text-dark,
+.text-secondary,
+.text-muted,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+span,
+label,
+li,
+th,
+td {
+  color: #f5f5f5 !important;
+}
+
+.btn-secondary,
+.btn-light {
+  background-color: #1b1b1b !important;
+  color: #f5f5f5 !important;
+  border-color: #333 !important;
+}

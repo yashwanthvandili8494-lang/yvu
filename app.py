@@ -76,6 +76,7 @@ class MySQLConnection:
     def __init__(self):
         self.conn = None
         self.backend = None
+        self.db_backend = os.getenv("DB_BACKEND", "sqlite").strip().lower()
         self.host = os.getenv("DB_HOST", "localhost")
         self.user = os.getenv("DB_USER", "root")
         self.password = os.getenv("DB_PASSWORD", "root")
@@ -113,10 +114,13 @@ class MySQLConnection:
         self.backend = "sqlite"
 
     def _connect(self):
-        try:
-            self._connect_mysql()
-        except Exception:
-            self._connect_sqlite()
+        if self.db_backend == "mysql":
+            try:
+                self._connect_mysql()
+                return
+            except Exception:
+                pass
+        self._connect_sqlite()
 
     def cursor(self):
         if self.conn is None:
@@ -219,21 +223,24 @@ app.config['CORS_HEADERS'] = 'Content-Type'
 app.secret_key= 'sem6project'
 
 def get_db_connection():
-    try:
-        return pymysql.connect(
-            host=os.getenv("DB_HOST", "localhost"),
-            user=os.getenv("DB_USER", "root"),
-            password=os.getenv("DB_PASSWORD", "root"),
-            database=os.getenv("DB_NAME", "quizapp"),
-            port=int(os.getenv("DB_PORT", "3306")),
-            cursorclass=pymysql.cursors.DictCursor,
-            charset="utf8mb4",
-            autocommit=False,
-        )
-    except Exception:
-        conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH", "quizapp.db"), check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        return conn
+    db_backend = os.getenv("DB_BACKEND", "sqlite").strip().lower()
+    if db_backend == "mysql":
+        try:
+            return pymysql.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                user=os.getenv("DB_USER", "root"),
+                password=os.getenv("DB_PASSWORD", "root"),
+                database=os.getenv("DB_NAME", "quizapp"),
+                port=int(os.getenv("DB_PORT", "3306")),
+                cursorclass=pymysql.cursors.DictCursor,
+                charset="utf8mb4",
+                autocommit=False,
+            )
+        except Exception:
+            pass
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH", "quizapp.db"), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 sender = 'youremail@abc.com'
 
@@ -243,6 +250,28 @@ PDF_LINK_PATH = r"C:\Users\mg005\Documents\testquestion.pdf"
 @app.before_request
 def make_session_permanent():
 	session.permanent = True
+
+def normalize_test_id(value):
+	if value is None:
+		return ""
+	return "".join(str(value).strip().lower().split())
+
+def parse_exam_datetime(value):
+	"""Safely parse exam datetime values from DB across sqlite/mysql string formats."""
+	if value is None:
+		return None
+	if isinstance(value, datetime):
+		return value
+	text = str(value).strip()
+	if not text:
+		return None
+	try:
+		return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+	except Exception:
+		try:
+			return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+		except Exception:
+			return None
 
 def user_role_professor(f):
 	@wraps(f)
@@ -356,28 +385,37 @@ def create_checkout_session():
 @app.route("/livemonitoringtid")
 @user_role_professor
 def livemonitoringtid():
-	cur = mysql.connection.cursor()
-	results = cur.execute('SELECT * from teachers where email = ? and uid = ? and proctoring_type = 1', (session['email'], session['uid']))
-	if results > 0:
-		cresults = cur.fetchall()
-		now = datetime.now()
-		now = now.strftime("%Y-%m-%d %H:%M:%S")
-		now = datetime.strptime(now,"%Y-%m-%d %H:%M:%S")
-		testids = []
-		for a in cresults:
-			if datetime.strptime(str(a['start']),"%Y-%m-%d %H:%M:%S") <= now and datetime.strptime(str(a['end']),"%Y-%m-%d %H:%M:%S") >= now:
-				testids.append(a['test_id'])
+	try:
+		cur = mysql.connection.cursor()
+		results = cur.execute(
+			'SELECT test_id, start, end from teachers where email = ? and uid = ? and proctoring_type = 1',
+			(session['email'], session['uid'])
+		)
+		if results > 0:
+			cresults = cur.fetchall()
+			now = datetime.now()
+			testids = []
+			for a in cresults:
+				start_dt = parse_exam_datetime(a['start'])
+				end_dt = parse_exam_datetime(a['end'])
+				if start_dt and end_dt and start_dt <= now <= end_dt:
+					testids.append(a['test_id'])
+			cur.close()
+			return render_template("livemonitoringtid.html", cresults = testids)
 		cur.close()
-		return render_template("livemonitoringtid.html", cresults = testids)
-	else:
+		return render_template("livemonitoringtid.html", cresults = None)
+	except Exception:
 		return render_template("livemonitoringtid.html", cresults = None)
 
 @app.route('/live_monitoring', methods=['GET','POST'])
 @user_role_professor
 def live_monitoring():
 	if request.method == 'POST':
-		testid = request.form['choosetid']
-		return render_template('live_monitoring.html',testid = testid)
+		testid = (request.form.get('choosetid') or "").strip()
+		if not testid:
+			flash('Please select a valid live exam ID.', 'danger')
+			return render_template('live_monitoring.html', testid=None)
+		return render_template('live_monitoring.html', testid=testid)
 	else:
 		return render_template('live_monitoring.html',testid = None)	
 
@@ -705,16 +743,25 @@ def changePassword():
 
 @app.route('/logout', methods=["GET", "POST"])
 def logout():
+	is_ajax = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
 	if 'email' not in session or 'uid' not in session:
 		session.clear()
-		return "success"
+		if is_ajax:
+			return "success"
+		return redirect(url_for('login'))
 	cur = mysql.connection.cursor()
 	lbr = cur.execute('UPDATE users set user_login = 0 where email = ? and uid = ?',(session['email'],session['uid']))
 	mysql.connection.commit()
+	cur.close()
 	if lbr > 0:
 		session.clear()
-		return "success"
+		if is_ajax:
+			return "success"
+		return redirect(url_for('login'))
 	else:
+		if not is_ajax:
+			session.clear()
+			return redirect(url_for('login'))
 		return "error"
 
 def examcreditscheck():
@@ -1604,11 +1651,29 @@ def test_update_time():
 def give_test():
 	global duration, marked_ans, calc, subject, topic, proctortype
 	form = TestForm(request.form)
+	available_test_ids = []
+	try:
+		now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+		cur_ids = mysql.connection.cursor()
+		results_ids = cur_ids.execute(
+			'SELECT test_id FROM teachers WHERE start <= ? AND end >= ? ORDER BY start ASC',
+			(now, now)
+		)
+		if results_ids > 0:
+			rows = cur_ids.fetchall()
+			available_test_ids = [row['test_id'] for row in rows if row['test_id']]
+		cur_ids.close()
+	except Exception:
+		available_test_ids = []
+
 	error_msg = request.args.get('error')
 	if error_msg:
 		flash(error_msg, 'danger')
 	if request.method == 'POST' and form.validate():
-		test_id = form.test_id.data
+		test_id = ((form.test_id.data if form.test_id.data is not None else request.form.get('test_id', '')) or "").strip()
+		if not test_id:
+			flash('Please select a valid Exam ID from dropdown', 'danger')
+			return redirect(url_for('give_test'))
 		password_candidate = form.password.data
 		imgdata1 = form.img_hidden_form.data
 		cur1 = mysql.connection.cursor()
@@ -1625,9 +1690,17 @@ def give_test():
 			# if img_result["verified"] == True:
 			if True:
 				cur = mysql.connection.cursor()
-				results = cur.execute('SELECT * from teachers where test_id = ?', [test_id])
+				results = cur.execute('SELECT * FROM teachers ORDER BY tid DESC')
+				data = None
 				if results > 0:
-					data = cur.fetchone()
+					input_norm = normalize_test_id(test_id)
+					all_tests = cur.fetchall()
+					for row in all_tests:
+						if normalize_test_id(row['test_id']) == input_norm:
+							data = row
+							break
+				if data is not None:
+					test_id = data['test_id']
 					password = data['password']
 					duration = data['duration']
 					calc = data['calc']
@@ -1692,22 +1765,50 @@ def give_test():
 					else:
 						flash('Invalid password', 'danger')
 						return redirect(url_for('give_test'))
-				flash('Invalid testid', 'danger')
+				flash('Invalid testid. Select from active exam list and try again.', 'danger')
 				return redirect(url_for('give_test'))
 				cur.close()
 			else:
 				flash('Image not Verified', 'danger')
 				return redirect(url_for('give_test'))
-	return render_template('give_test.html', form = form)
+	return render_template('give_test.html', form=form, available_test_ids=available_test_ids)
 
 @app.route('/give-test/<testid>', methods=['GET','POST'])
 @user_role_student
 def test(testid):
+	testid = (testid or "").strip()
 	cur = mysql.connection.cursor()
-	cur.execute('SELECT test_type from teachers where test_id = ? ', [testid])
-	callresults = cur.fetchone()
+	callresults = None
+	normalized_id = normalize_test_id(testid)
+	results = cur.execute(
+		'SELECT test_id, test_type, start, end FROM teachers WHERE LOWER(TRIM(test_id)) = ? ORDER BY tid DESC',
+		[normalized_id]
+	)
+	if results > 0:
+		callresults = cur.fetchone()
+		testid = callresults['test_id']
+	else:
+		now_window = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+		active_results = cur.execute(
+			'SELECT test_id, test_type, start, end FROM teachers WHERE start <= ? AND end >= ? ORDER BY start ASC',
+			(now_window, now_window)
+		)
+		if active_results > 0:
+			active_rows = cur.fetchall()
+			if len(active_rows) == 1:
+				callresults = active_rows[0]
+				testid = callresults['test_id']
+			else:
+				for row in active_rows:
+					if normalize_test_id(row['test_id']) == normalized_id:
+						callresults = row
+						testid = row['test_id']
+						break
 	cur.close()
-	if not callresults or 'test_type' not in callresults:
+	if not callresults:
+		return redirect(url_for('give_test', error='Invalid testid'))
+	test_type_value = callresults['test_type'] if callresults['test_type'] is not None else ""
+	if str(test_type_value).strip() == "":
 		return redirect(url_for('give_test', error='Invalid testid'))
 
 	if callresults['test_type'] == "objective":
@@ -1757,7 +1858,7 @@ def test(testid):
 					return json.dumps({'time': 'error'})
 			else:
 				cur = mysql.connection.cursor()
-				cur.execute('UPDATE studentTestInfo set completed=1,time_left=sec_to_time(0) where test_id = ? and email = ? and uid = ?', (testid, session['email'],session['uid']))
+				cur.execute('UPDATE studentTestInfo set completed=1,time_left=? where test_id = ? and email = ? and uid = ?', (0, testid, session['email'],session['uid']))
 				mysql.connection.commit()
 				cur.close()
 				flash("Exam submitted successfully", 'info')
@@ -1766,7 +1867,7 @@ def test(testid):
 	elif callresults['test_type'] == "subjective":
 		if request.method == 'GET':
 			cur = mysql.connection.cursor()
-			cur.execute('SELECT test_id, qid, q, marks from longqa where test_id = ? ORDER BY RAND()',[testid])
+			cur.execute('SELECT test_id, qid, q, marks from longqa where test_id = ? ORDER BY qid ASC',[testid])
 			callresults1 = cur.fetchall()
 			cur.execute('SELECT time_left as duration from studentTestInfo where completed = 0 and test_id = ? and email = ? and uid = ?', (testid, session['email'], session['uid']))
 			studentTestInfo = cur.fetchone()
@@ -1823,7 +1924,7 @@ def test(testid):
 	elif callresults['test_type'] == "practical":
 		if request.method == 'GET':
 			cur = mysql.connection.cursor()
-			cur.execute('SELECT test_id, qid, q, marks, compiler from practicalqa where test_id = ? ORDER BY RAND()',[testid])
+			cur.execute('SELECT test_id, qid, q, marks, compiler from practicalqa where test_id = ? ORDER BY qid ASC',[testid])
 			callresults1 = cur.fetchall()
 			cur.execute('SELECT time_left as duration from studentTestInfo where completed = 0 and test_id = ? and email = ? and uid = ?', (testid, session['email'], session['uid']))
 			studentTestInfo = cur.fetchone()
