@@ -1,5 +1,23 @@
 {% extends 'exam_layout.html' %}
 {% block body %}
+<style>
+  body, main, section {
+    background: #000 !important;
+  }
+  .exam-dark-card {
+    background: #0b0b0b !important;
+    color: #fff !important;
+    border-color: #222 !important;
+  }
+  .exam-dark-card table,
+  .exam-dark-card td,
+  .exam-dark-card th,
+  .exam-dark-card #que,
+  .exam-dark-card #queid,
+  .exam-dark-card #mark {
+    color: #fff !important;
+  }
+</style>
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
 <script type="text/javascript"> var answers = "{{answers}}";</script>
 <script>var tid = "{{tid}}";</script>
@@ -7,12 +25,13 @@
   <section class="d-flex align-items-center my-5 mt-lg-6 mb-lg-5">
              <div class="container">
                      <div class="col-12 d-flex align-items-center justify-content-center">
-                         <div class="bg-white shadow-soft border rounded border-light p-4 p-lg-5 w-100 fmxw-900">
+                         <div class="exam-dark-card shadow-soft border rounded border-light p-4 p-lg-5 w-100 fmxw-900">
                              <div class="text-center text-md-center mb-4 mt-md-0">
                                  <div class="card-body">
                                   <div class="row">
                                     <div class="col"><span><h4 class="display-6">Name: {{session['name']}}</h4></span></div>
                                     <div class="col"><span><h4 class="display-6">Email: {{session['email']}}</h4></span></div>
+                                    <div class="col text-end"><a href="/logout" class="btn btn-danger btn-sm">Logout</a></div>
                                   </div>
                                   </div>
                              </div>

@@ -12,7 +12,13 @@
                     <div class="card-body">
 							        <form action="" method="POST" class="mt-4">
                                     <div class="form-group">
-                                      {{render_field(form.test_id, class="form-control")}}
+                                      <label for="test_id">Exam ID</label>
+                                      <select name="test_id" id="test_id" class="form-control" required>
+                                        <option value="">Select active exam ID</option>
+                                        {% for tid in available_test_ids %}
+                                          <option value="{{ tid }}">{{ tid }}</option>
+                                        {% endfor %}
+                                      </select>
                                     </div>
                                     <div class="form-group">
                                       {{render_field(form.password, class="form-control")}}

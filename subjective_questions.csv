@@ -1,0 +1,6 @@
+qid,q,marks
+1,Explain object oriented programming with an example.,10
+2,Describe the lifecycle of a Flask request in detail.,10
+3,Write a short note on database indexing and why it improves query performance.,10
+4,Explain difference between threading and multiprocessing with use-cases.,10
+5,What is normalization in databases and when should denormalization be considered?,10
