@@ -3,6 +3,9 @@ import os
 import pymysql
 import sqlite3
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_SQLITE_PATH = os.path.join(BASE_DIR, "quizapp.db")
+
 class CompatMySQLCursor:
     def __init__(self, cursor, backend):
         self._cursor = cursor
@@ -82,7 +85,7 @@ class MySQLConnection:
         self.password = os.getenv("DB_PASSWORD", "root")
         self.database = os.getenv("DB_NAME", "quizapp")
         self.port = int(os.getenv("DB_PORT", "3306"))
-        self.sqlite_path = os.getenv("SQLITE_DB_PATH", "quizapp.db")
+        self.sqlite_path = os.getenv("SQLITE_DB_PATH", DEFAULT_SQLITE_PATH)
     
     @property
     def connection(self):
@@ -186,12 +189,12 @@ app = Flask(__name__)
 # app.config['MYSQL_DB'] = 'quizapp'
 # app.config['MYSQL_CURSORCLASS'] = 'DictCursor'
 
-app.config['MAIL_SERVER']='smtp.stackmail.com'
-app.config['MAIL_PORT'] = 587
-app.config['MAIL_USERNAME'] = 'care@youremail.com'
-app.config['MAIL_PASSWORD'] = 'password'
-app.config['MAIL_USE_TLS'] = True
-app.config['MAIL_USE_SSL'] = False
+app.config['MAIL_SERVER'] = os.getenv('MAIL_SERVER', 'smtp.gmail.com')
+app.config['MAIL_PORT'] = int(os.getenv('MAIL_PORT', '587'))
+app.config['MAIL_USERNAME'] = os.getenv('MAIL_USERNAME', '')
+app.config['MAIL_PASSWORD'] = os.getenv('MAIL_PASSWORD', '')
+app.config['MAIL_USE_TLS'] = os.getenv('MAIL_USE_TLS', 'true').strip().lower() in ('1', 'true', 'yes', 'on')
+app.config['MAIL_USE_SSL'] = os.getenv('MAIL_USE_SSL', 'false').strip().lower() in ('1', 'true', 'yes', 'on')
 
 app.config['SESSION_COOKIE_SAMESITE'] = "Lax"
 
@@ -204,8 +207,8 @@ app.permanent_session_lifetime = timedelta(days=1)
 app.config["TEMPLATES_AUTO_RELOAD"] = True
 
 stripe_keys = {
-    "secret_key": "dummy",
-    "publishable_key": "dummy",
+    "secret_key": os.getenv("STRIPE_SECRET_KEY", "dummy"),
+    "publishable_key": os.getenv("STRIPE_PUBLISHABLE_KEY", "dummy"),
 }
 
 stripe.api_key = stripe_keys["secret_key"]
@@ -238,13 +241,13 @@ def get_db_connection():
             )
         except Exception:
             pass
-    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH", "quizapp.db"), check_same_thread=False)
+    conn = sqlite3.connect(os.getenv("SQLITE_DB_PATH", DEFAULT_SQLITE_PATH), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 sender = 'youremail@abc.com'
 
-YOUR_DOMAIN = 'http://localhost:5000'
+YOUR_DOMAIN = os.getenv("YOUR_DOMAIN", "http://localhost:5000")
 PDF_LINK_PATH = r"C:\Users\mg005\Documents\testquestion.pdf"
 
 @app.before_request
@@ -359,6 +362,8 @@ def window_event():
 @app.route('/create-checkout-session', methods=['POST'])
 def create_checkout_session():
     try:
+        if not stripe_keys["secret_key"] or stripe_keys["secret_key"] == "dummy":
+            return jsonify(error="Payment is not configured. Set STRIPE_SECRET_KEY and STRIPE_PUBLISHABLE_KEY."), 400
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=['card'],
             line_items=[
@@ -367,7 +372,7 @@ def create_checkout_session():
                         'currency': 'inr',
                         'unit_amount': 499*100,
                         'product_data': {
-                            'name': 'Basic Exam Plan of 10 units',
+                            'name': 'Basic Exam Plan of 5 units',
                             'images': ['https://i.imgur.com/LsvO3kL_d.webp?maxwidth=760&fidelity=grand'],
                         },
                     },
@@ -391,19 +396,38 @@ def livemonitoringtid():
 			'SELECT test_id, start, end from teachers where email = ? and uid = ? and proctoring_type = 1',
 			(session['email'], session['uid'])
 		)
-		if results > 0:
+		cresults = cur.fetchall()
+		if not cresults:
+			cur.execute(
+				'SELECT test_id, start, end from teachers where email = ? and proctoring_type = 1',
+				(session['email'],)
+			)
 			cresults = cur.fetchall()
-			now = datetime.now()
-			testids = []
-			for a in cresults:
-				start_dt = parse_exam_datetime(a['start'])
-				end_dt = parse_exam_datetime(a['end'])
-				if start_dt and end_dt and start_dt <= now <= end_dt:
-					testids.append(a['test_id'])
-			cur.close()
-			return render_template("livemonitoringtid.html", cresults = testids)
 		cur.close()
-		return render_template("livemonitoringtid.html", cresults = None)
+
+		if not cresults:
+			return render_template("livemonitoringtid.html", cresults = None)
+
+		now = datetime.now()
+		live_ids = []
+		nearby_ids = []
+		all_ids = []
+		for a in cresults:
+			tid = a['test_id']
+			start_dt = parse_exam_datetime(a['start'])
+			end_dt = parse_exam_datetime(a['end'])
+			all_ids.append(tid)
+			if start_dt and end_dt and start_dt <= now <= end_dt:
+				live_ids.append(tid)
+			elif start_dt and end_dt:
+				# Fallback list for usability when no exam is currently live.
+				if end_dt >= (now - timedelta(hours=12)) or start_dt >= now:
+					nearby_ids.append(tid)
+
+		final_ids = live_ids if live_ids else (nearby_ids if nearby_ids else all_ids)
+		# Remove duplicates while preserving order.
+		final_ids = list(dict.fromkeys(final_ids))
+		return render_template("livemonitoringtid.html", cresults = final_ids if final_ids else None)
 	except Exception:
 		return render_template("livemonitoringtid.html", cresults = None)
 
@@ -423,7 +447,7 @@ def live_monitoring():
 @user_role_professor
 def success():
 	cur = mysql.connection.cursor()
-	cur.execute('UPDATE users set examcredits = examcredits+10 where email = ? and uid = ?', (session['email'], session['uid']))
+	cur.execute('UPDATE users set examcredits = examcredits+5 where email = ? and uid = ?', (session['email'], session['uid']))
 	mysql.connection.commit()
 	cur.close()
 	return render_template("success.html")
@@ -440,7 +464,12 @@ def payment():
 	cur.execute('SELECT examcredits FROM USERS where email = ? and uid = ?', (session['email'], session['uid']))
 	callresults = cur.fetchone()
 	cur.close()
-	return render_template("payment.html", key = stripe_keys['publishable_key'], callresults = callresults)
+	return render_template(
+		"payment.html",
+		key=stripe_keys['publishable_key'],
+		callresults=callresults,
+		payment_enabled=(stripe_keys['publishable_key'] != "dummy" and stripe_keys['secret_key'] != "dummy")
+	)
 
 @app.route('/')
 def index():
@@ -453,7 +482,9 @@ def not_found(e):
 @app.errorhandler(500)
 def internal_error(error):
 	app.logger.exception("Unhandled 500 error: %s", error)
-	return render_template("500.html") 
+	if request.path.startswith('/give-test'):
+		return redirect(url_for('student_index'))
+	return render_template("500.html"), 500 
 
 @app.errorhandler(pymysql.MySQLError)
 def handle_mysql_error(error):
@@ -1293,6 +1324,9 @@ def examtypecheck(tidoption):
 	cur = mysql.connection.cursor()
 	cur.execute('SELECT test_type from teachers where test_id = ? and email = ? and uid = ?', (tidoption,session['email'],session['uid']))
 	callresults = cur.fetchone()
+	if not callresults:
+		cur.execute('SELECT test_type from teachers where test_id = ? and email = ?', (tidoption,session['email']))
+		callresults = cur.fetchone()
 	cur.close()
 	return callresults
 
@@ -1338,18 +1372,26 @@ def viewstudentslogs():
 @user_role_professor
 def insertmarkstid():
 	cur = mysql.connection.cursor()
-	results = cur.execute('SELECT * from teachers where show_ans = 0 and email = ? and uid = ? and (test_type = ? or test_type = ?)', (session['email'], session['uid'],"subjective","practical"))
-	if results > 0:
+	results = cur.execute(
+		'SELECT * from teachers where show_ans = 0 and email = ? and uid = ? and (test_type = ? or test_type = ?)',
+		(session['email'], session['uid'], "subjective", "practical")
+	)
+	cresults = cur.fetchall()
+	if not cresults:
+		cur.execute(
+			'SELECT * from teachers where show_ans = 0 and email = ? and (test_type = ? or test_type = ?)',
+			(session['email'], "subjective", "practical")
+		)
 		cresults = cur.fetchall()
+	if cresults:
 		now = datetime.now()
-		now = now.strftime("%Y-%m-%d %H:%M:%S")
-		now = datetime.strptime(now,"%Y-%m-%d %H:%M:%S")
 		testids = []
 		for a in cresults:
-			if datetime.strptime(str(a['end']),"%Y-%m-%d %H:%M:%S") < now:
+			end_dt = parse_exam_datetime(a['end'])
+			if end_dt and end_dt < now:
 				testids.append(a['test_id'])
 		cur.close()
-		return render_template("insertmarkstid.html", cresults = testids)
+		return render_template("insertmarkstid.html", cresults = testids if testids else None)
 	else:
 		return render_template("insertmarkstid.html", cresults = None)
 
@@ -1369,19 +1411,42 @@ def displaystudentsdetails():
 @user_role_professor
 def insertmarksdetails():
 	if request.method == 'POST':
-		tidoption = request.form['choosetid']
-		et = examtypecheck(tidoption)
-		if et['test_type'] == "subjective":
+		tidoption = (request.form.get('choosetid') or "").strip()
+		cur = mysql.connection.cursor()
+		cur.execute(
+			'SELECT test_id, test_type FROM teachers WHERE lower(trim(email)) = lower(trim(?))',
+			(session['email'],)
+		)
+		rows = cur.fetchall()
+		cur.close()
+		match = None
+		input_norm = normalize_test_id(tidoption)
+		for row in rows:
+			if normalize_test_id(row['test_id']) == input_norm:
+				match = row
+				break
+		if not match or not match['test_type']:
+			flash("Invalid test id", 'danger')
+			return redirect(url_for('insertmarkstid'))
+		tidoption = match['test_id']
+		ttype = str(match['test_type']).strip().lower()
+		if ttype == "subjective":
 			cur = mysql.connection.cursor()
-			cur.execute('SELECT DISTINCT email,test_id from longtest where test_id = ?', [tidoption])
+			cur.execute('SELECT DISTINCT email,test_id from longtest where lower(trim(test_id)) = lower(trim(?))', [tidoption])
 			callresults = cur.fetchall()
 			cur.close()
+			if not callresults:
+				flash('No submissions found for this exam yet.', 'warning')
+				return redirect(url_for('insertmarkstid'))
 			return render_template("subdispstudentsdetails.html", callresults = callresults)
-		elif et['test_type'] == "practical":
+		elif ttype == "practical":
 			cur = mysql.connection.cursor()
-			cur.execute('SELECT DISTINCT email,test_id from practicaltest where test_id = ?', [tidoption])
+			cur.execute('SELECT DISTINCT email,test_id from practicaltest where lower(trim(test_id)) = lower(trim(?))', [tidoption])
 			callresults = cur.fetchall()
 			cur.close()
+			if not callresults:
+				flash('No submissions found for this exam yet.', 'warning')
+				return redirect(url_for('insertmarkstid'))
 			return render_template("pracdispstudentsdetails.html", callresults = callresults)
 		else:
 			flash("Some Error was occured!",'error')
@@ -1549,36 +1614,97 @@ def share_details(testid,email):
 @app.route('/share_details_emails', methods=['GET','POST'])
 @user_role_professor
 def share_details_emails():
+	def _load_exam_rows(tid_value):
+		if not tid_value:
+			return []
+		cur_local = mysql.connection.cursor()
+		cur_local.execute('SELECT * from teachers where test_id = ? and email = ?', (tid_value, session['email']))
+		rows_local = cur_local.fetchall()
+		cur_local.close()
+		return rows_local
+
 	if request.method == 'POST':
-		tid = request.form['tid']
-		subject = request.form['subject']
-		topic = request.form['topic']
-		duration = request.form['duration']
-		start = request.form['start']
-		end = request.form['end']
-		password = request.form['password']
-		neg_marks = request.form['neg_marks']
-		calc = request.form['calc']
-		emailssharelist = request.form['emailssharelist']
-		msg1 = Message('EXAM DETAILS - MyProctor.ai', sender = sender, recipients = [emailssharelist])
-		msg1.body = " ".join(["EXAM-ID:", tid, "SUBJECT:", subject, "TOPIC:", topic, "DURATION:", duration, "START", start, "END", end, "PASSWORD", password, "NEGATIVE MARKS in %:", neg_marks,"CALCULATOR ALLOWED:",calc ]) 
-		mail.send(msg1)
-		flash('Emails sended sucessfully!', 'success')
-	return render_template('share_details.html')
+		tid = (request.form.get('tid') or '').strip()
+		subject = request.form.get('subject', '')
+		topic = request.form.get('topic', '')
+		duration = request.form.get('duration', '')
+		start = request.form.get('start', '')
+		end = request.form.get('end', '')
+		password = request.form.get('password', '')
+		neg_marks = request.form.get('neg_marks', '')
+		calc = request.form.get('calc', '')
+		emailssharelist = request.form.get('emailssharelist', '')
+		recipients = [e.strip() for e in emailssharelist.split(',') if e.strip()]
+		callresults = _load_exam_rows(tid)
+
+		if not tid or not callresults:
+			flash('Invalid exam details.', 'danger')
+			return render_template('share_details.html', callresults=callresults)
+		if not recipients:
+			flash('Please enter at least one valid recipient email.', 'danger')
+			return render_template('share_details.html', callresults=callresults)
+
+		body = " ".join([
+			"EXAM-ID:", tid, "SUBJECT:", subject, "TOPIC:", topic, "DURATION:", str(duration),
+			"START", str(start), "END", str(end), "PASSWORD", str(password),
+			"NEGATIVE MARKS in %:", str(neg_marks), "CALCULATOR ALLOWED:", str(calc)
+		])
+
+		# Use SMTP directly to avoid crashing when Flask-Mail is not configured.
+		try:
+			import smtplib
+			from email.message import EmailMessage
+			smtp_user = app.config.get('MAIL_USERNAME', '')
+			smtp_pass = app.config.get('MAIL_PASSWORD', '')
+			smtp_host = app.config.get('MAIL_SERVER', '')
+			smtp_port = int(app.config.get('MAIL_PORT', 587))
+			use_tls = bool(app.config.get('MAIL_USE_TLS', True))
+			if not smtp_user or not smtp_pass:
+				flash('Email not configured. Update MAIL_USERNAME and MAIL_PASSWORD.', 'warning')
+				return render_template('share_details.html', callresults=callresults)
+
+			msg = EmailMessage()
+			msg['Subject'] = 'EXAM DETAILS - MyProctor.ai'
+			msg['From'] = smtp_user
+			msg['To'] = ', '.join(recipients)
+			msg.set_content(body)
+
+			with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+				if use_tls:
+					server.starttls()
+				server.login(smtp_user, smtp_pass)
+				server.send_message(msg)
+
+			flash('Emails sent successfully!', 'success')
+			return render_template('share_details.html', callresults=callresults)
+		except Exception as e:
+			flash(f'Unable to send email: {str(e)}', 'danger')
+			return render_template('share_details.html', callresults=callresults)
+
+	tid = (request.args.get('tid') or '').strip()
+	return render_template('share_details.html', callresults=_load_exam_rows(tid))
 
 @app.route("/publish-results-testid", methods=['GET','POST'])
 @user_role_professor
 def publish_results_testid():
 	cur = mysql.connection.cursor()
-	results = cur.execute('SELECT * from teachers where test_type != ? AND show_ans = 0 AND email = ? AND uid = ?', ("objectve", session['email'], session['uid']))
-	if results > 0:
+	results = cur.execute(
+		'SELECT * from teachers where email = ? AND uid = ?',
+		(session['email'], session['uid'])
+	)
+	cresults = cur.fetchall()
+	if not cresults:
+		cur.execute(
+			'SELECT * from teachers where email = ?',
+			(session['email'],)
+		)
 		cresults = cur.fetchall()
+	if cresults:
 		now = datetime.now()
-		now = now.strftime("%Y-%m-%d %H:%M:%S")
-		now = datetime.strptime(now,"%Y-%m-%d %H:%M:%S")
 		testids = []
 		for a in cresults:
-			if datetime.strptime(str(a['end']),"%Y-%m-%d %H:%M:%S") < now:
+			end_dt = parse_exam_datetime(a['end'])
+			if end_dt and end_dt < now:
 				testids.append(a['test_id'])
 		cur.close()
 		return render_template("publish_results_testid.html", cresults = testids)
@@ -1589,19 +1715,45 @@ def publish_results_testid():
 @user_role_professor
 def viewresults():
 	if request.method == 'POST':
-		tidoption = request.form['choosetid']
-		et = examtypecheck(tidoption)
-		if et['test_type'] == "subjective":
+		tidoption = (request.form.get('choosetid') or "").strip()
+		cur = mysql.connection.cursor()
+		cur.execute(
+			'SELECT test_id, test_type FROM teachers WHERE lower(trim(email)) = lower(trim(?))',
+			(session['email'],)
+		)
+		rows = cur.fetchall()
+		cur.close()
+		match = None
+		input_norm = normalize_test_id(tidoption)
+		for row in rows:
+			if normalize_test_id(row['test_id']) == input_norm:
+				match = row
+				break
+		if not match or not match['test_type']:
+			flash("Invalid test id", 'danger')
+			return redirect(url_for('publish_results_testid'))
+		tidoption = match['test_id']
+		ttype = str(match['test_type']).strip().lower()
+		if ttype == "subjective":
 			cur = mysql.connection.cursor()
 			cur.execute('SELECT SUM(marks) as marks, email from longtest where test_id = ? group by email', ([tidoption]))
 			callresults = cur.fetchall()
 			cur.close()
 			return render_template("publish_viewresults.html", callresults = callresults, tid = tidoption)
-		elif et['test_type'] == "practical":
+		elif ttype == "practical":
 			cur = mysql.connection.cursor()
 			cur.execute('SELECT SUM(marks) as marks, email from practicaltest where test_id = ? group by email', ([tidoption]))
 			callresults = cur.fetchall()
 			cur.close()
+			return render_template("publish_viewresults.html", callresults = callresults, tid = tidoption)
+		elif ttype == "objective":
+			cur = mysql.connection.cursor()
+			cur.execute('SELECT DISTINCT email from students where test_id = ?',[tidoption])
+			students_list = cur.fetchall()
+			cur.close()
+			callresults = []
+			for s in students_list:
+				callresults.append({'email': s['email'], 'marks': marks_calc(s['email'], tidoption)})
 			return render_template("publish_viewresults.html", callresults = callresults, tid = tidoption)
 		else:
 			flash("Some Error Occured!")
@@ -1614,7 +1766,24 @@ def publish_results():
 	if request.method == 'POST':
 		tidoption = request.form['testidsp']
 		cur = mysql.connection.cursor()
-		cur.execute('UPDATE teachers set show_ans = 1 where test_id = ?', ([tidoption]))
+		cur.execute('SELECT show_ans from teachers where test_id = ? and email = ? and uid = ?', (tidoption, session['email'], session['uid']))
+		check = cur.fetchone()
+		if not check:
+			cur.execute('SELECT show_ans from teachers where test_id = ? and email = ?', (tidoption, session['email']))
+			check = cur.fetchone()
+		if check and int(check['show_ans']) == 1:
+			cur.close()
+			flash("Results already published.")
+			return redirect(url_for('publish_results_testid'))
+		cur.execute(
+			'UPDATE teachers set show_ans = 1 where test_id = ? and email = ? and uid = ?',
+			(tidoption, session['email'], session['uid'])
+		)
+		if cur.rowcount == 0:
+			cur.execute(
+				'UPDATE teachers set show_ans = 1 where test_id = ? and email = ?',
+				(tidoption, session['email'])
+			)
 		mysql.connection.commit()
 		cur.close()
 		flash("Results published sucessfully!")
@@ -1636,6 +1805,12 @@ def test_update_time():
 			return "time recorded updated"
 		else:
 			cur = mysql.connection.cursor()
+			# Do not create a new active row if exam already has a completed record.
+			cur.execute('SELECT completed from studentTestInfo where test_id = ? and email = ? order by stiid desc limit 1', (testid, session['email']))
+			last_row = cur.fetchone()
+			if last_row is not None and int(last_row['completed']) == 1:
+				cur.close()
+				return "exam already completed"
 			cur.execute('INSERT into studentTestInfo (email, test_id,time_left,uid) values(?,?,?,?)', (session['email'], testid, time_left, session['uid']))
 			mysql.connection.commit()
 			t2 = cur.rowcount
@@ -1713,9 +1888,13 @@ def give_test():
 					proctortype = data['proctoring_type']
 					if password == password_candidate:
 						now = datetime.now()
-						now = now.strftime("%Y-%m-%d %H:%M:%S")
-						now = datetime.strptime(now,"%Y-%m-%d %H:%M:%S")
-						if datetime.strptime(start,"%Y-%m-%d %H:%M:%S") < now and datetime.strptime(end,"%Y-%m-%d %H:%M:%S") > now:
+						start_dt = parse_exam_datetime(start)
+						end_dt = parse_exam_datetime(end)
+						if start_dt is None or end_dt is None:
+							flash('Exam schedule is invalid. Contact professor.', 'danger')
+							return redirect(url_for('give_test'))
+						# Inclusive window: allow start and end boundary timestamps.
+						if start_dt <= now <= end_dt:
 							results = cur.execute('SELECT time_left as time_left,completed from studentTestInfo where email = ? and test_id = ?', (session['email'], test_id))
 							if results > 0:
 								results = cur.fetchone()
@@ -1756,7 +1935,7 @@ def give_test():
 													marked_ans[row['qid']] = row['ans']
 												marked_ans = json.dumps(marked_ans)
 						else:
-							if datetime.strptime(start,"%Y-%m-%d %H:%M:%S") > now:
+							if start_dt > now:
 								flash(f'Exam start time is {start}', 'danger')
 							else:
 								flash(f'Exam has ended', 'danger')
@@ -1820,49 +1999,57 @@ def test(testid):
 			except:
 				return redirect(url_for('give_test'))
 		else:
-			cur = mysql.connection.cursor()
-			flag = request.form['flag']
-			if flag == 'get':
-				num = request.form['no']
-				results = cur.execute('SELECT test_id,qid,q,a,b,c,d,ans,marks from questions where test_id = ? and qid =?',(testid, num))
-				if results > 0:
-					data = cur.fetchone()
-					del data['ans']
-					cur.close()
-					return json.dumps(data)
-				cur.close()
-				return json.dumps({'error': 'Question not found'})
-			elif flag=='mark':
-				qid = request.form['qid']
-				ans = request.form['ans']
+			try:
 				cur = mysql.connection.cursor()
-				results = cur.execute('SELECT * from students where test_id =? and qid = ? and email = ?', (testid, qid, session['email']))
-				if results > 0:
-					cur.execute('UPDATE students set ans = ? where test_id = ? and qid = ? and email = ?', (testid, qid, session['email']))
-					mysql.connection.commit()
+				flag = (request.form.get('flag') or '').strip().lower()
+				if flag == 'get':
+					num = request.form.get('no')
+					results = cur.execute('SELECT test_id,qid,q,a,b,c,d,ans,marks from questions where test_id = ? and qid =?', (testid, num))
+					if results > 0:
+						data = dict(cur.fetchone())
+						data.pop('ans', None)
+						cur.close()
+						return json.dumps(data)
 					cur.close()
+					return json.dumps({'error': 'Question not found'})
+				elif flag == 'mark':
+					qid = request.form.get('qid')
+					ans = request.form.get('ans')
+					cur = mysql.connection.cursor()
+					results = cur.execute('SELECT * from students where test_id =? and qid = ? and email = ?', (testid, qid, session['email']))
+					if results > 0:
+						cur.execute('UPDATE students set ans = ? where test_id = ? and qid = ? and email = ?', (ans, testid, qid, session['email']))
+						mysql.connection.commit()
+						cur.close()
+					else:
+						cur.execute('INSERT INTO students(email,test_id,qid,ans,uid) values(?,?,?,?,?)', (session['email'], testid, qid, ans, session['uid']))
+						mysql.connection.commit()
+						cur.close()
+					return json.dumps({'status': 'ok'})
+				elif flag == 'time':
+					cur = mysql.connection.cursor()
+					time_left = request.form.get('time', 0)
+					try:
+						cur.execute('UPDATE studentTestInfo set time_left=? where test_id = ? and email = ? and uid = ? and completed=0', (time_left, testid, session['email'], session['uid']))
+						mysql.connection.commit()
+						cur.close()
+						return json.dumps({'time': 'fired'})
+					except Exception:
+						return json.dumps({'time': 'error'})
 				else:
-					cur.execute('INSERT INTO students(email,test_id,qid,ans,uid) values(?,?,?,?,?)', (session['email'], testid, qid, ans, session['uid']))
+					cur = mysql.connection.cursor()
+					cur.execute('UPDATE studentTestInfo set completed=1,time_left=? where test_id = ? and email = ? and uid = ?', (0, testid, session['email'], session['uid']))
+					if cur.rowcount == 0:
+						cur.execute('UPDATE studentTestInfo set completed=1,time_left=? where test_id = ? and email = ?', (0, testid, session['email']))
+					if cur.rowcount == 0:
+						cur.execute('INSERT into studentTestInfo (email, test_id, time_left, uid, completed) values(?,?,?,?,?)', (session['email'], testid, 0, session['uid'], 1))
 					mysql.connection.commit()
 					cur.close()
-				return json.dumps({'status': 'ok'})
-			elif flag=='time':
-				cur = mysql.connection.cursor()
-				time_left = request.form['time']
-				try:
-					cur.execute('UPDATE studentTestInfo set time_left=? where test_id = ? and email = ? and uid = ? and completed=0', (time_left, testid, session['email'], session['uid']))
-					mysql.connection.commit()
-					cur.close()
-					return json.dumps({'time':'fired'})
-				except Exception:
-					return json.dumps({'time': 'error'})
-			else:
-				cur = mysql.connection.cursor()
-				cur.execute('UPDATE studentTestInfo set completed=1,time_left=? where test_id = ? and email = ? and uid = ?', (0, testid, session['email'],session['uid']))
-				mysql.connection.commit()
-				cur.close()
-				flash("Exam submitted successfully", 'info')
-				return json.dumps({'sql':'fired'})
+					flash("Exam submitted successfully", 'info')
+					return json.dumps({'sql': 'fired'})
+			except Exception as e:
+				app.logger.exception("Objective POST error on %s: %s", testid, e)
+				return json.dumps({'error': 'submit_failed'})
 
 	elif callresults['test_type'] == "subjective":
 		if request.method == 'GET':
@@ -2055,40 +2242,77 @@ def tests_given(email):
 			cur = mysql.connection.cursor()
 			resultsTestids = cur.execute('select studenttestinfo.test_id as test_id from studenttestinfo,teachers where studenttestinfo.email = ? and studenttestinfo.uid = ? and studenttestinfo.completed=1 and teachers.test_id = studenttestinfo.test_id and teachers.show_ans = 1 ', (session['email'], session['uid']))
 			resultsTestids = cur.fetchall()
+			if not resultsTestids:
+				cur.execute('select distinct studenttestinfo.test_id as test_id from studenttestinfo,teachers where lower(trim(studenttestinfo.email)) = lower(trim(?)) and studenttestinfo.completed=1 and teachers.test_id = studenttestinfo.test_id and teachers.show_ans = 1 ', (session['email'],))
+				resultsTestids = cur.fetchall()
+			if not resultsTestids:
+				# Fallback: if completion flags are missing, still show tests where student has submitted answers.
+				cur.execute(
+					"SELECT DISTINCT t.test_id as test_id "
+					"FROM teachers t "
+					"WHERE t.show_ans = 1 AND ("
+					"t.test_id IN (SELECT s.test_id FROM students s WHERE lower(trim(s.email)) = lower(trim(?))) "
+					"OR t.test_id IN (SELECT l.test_id FROM longtest l WHERE lower(trim(l.email)) = lower(trim(?))) "
+					"OR t.test_id IN (SELECT p.test_id FROM practicaltest p WHERE lower(trim(p.email)) = lower(trim(?)))"
+					")",
+					(session['email'], session['email'], session['email'])
+				)
+				resultsTestids = cur.fetchall()
 			cur.close()
 			return render_template('tests_given.html', cresults = resultsTestids)
 		else:
 			flash('You are not authorized', 'danger')
 			return redirect(url_for('student_index'))
 	if request.method == "POST":
-		tidoption = request.form['choosetid']
+		if email != session['email']:
+			flash('You are not authorized', 'danger')
+			return redirect(url_for('student_index'))
+		tidoption = (request.form.get('choosetid') or '').strip()
+		if not tidoption:
+			flash('Please select a valid Exam ID.', 'danger')
+			return redirect(url_for('tests_given', email=session['email']))
 		cur = mysql.connection.cursor()
-		cur.execute('SELECT test_type from teachers where test_id = ?',[tidoption])
+		cur.execute('SELECT test_id, test_type from teachers where lower(trim(test_id)) = ?',[normalize_test_id(tidoption)])
 		callresults = cur.fetchone()
 		cur.close()
+		if not callresults or ('test_type' not in callresults.keys()) or not callresults['test_type']:
+			flash('Invalid test id', 'danger')
+			return redirect(url_for('tests_given', email=session['email']))
+		tidoption = callresults['test_id']
 		if callresults['test_type'] == "objective":
 			cur = mysql.connection.cursor()
 			results = cur.execute('select distinct(students.test_id) as test_id, students.email as email, subject,topic,neg_marks from students,studenttestinfo,teachers where students.email = ? and teachers.test_type = ? and students.test_id = ? and students.test_id=teachers.test_id and students.test_id=studenttestinfo.test_id and studenttestinfo.completed=1', (email, "objective", tidoption))
-			results = cur.fetchall()
+			rows = cur.fetchall()
+			if not rows:
+				cur.execute('select distinct students.test_id as test_id, students.email as email, teachers.subject as subject, teachers.topic as topic, teachers.neg_marks as neg_marks from students,teachers where lower(trim(students.email)) = lower(trim(?)) and students.test_id = ? and students.test_id=teachers.test_id', (email, tidoption))
+				rows = cur.fetchall()
 			cur.close()
-			results1 = []
-			studentResults = None
-			for a in results:
-				results1.append(neg_marks(a['email'],a['test_id'],a['neg_marks']))
-				studentResults = zip(results,results1)
+			studentResults = []
+			for a in rows:
+				item = dict(a)
+				item['marks'] = neg_marks(a['email'], a['test_id'], a['neg_marks'])
+				studentResults.append(item)
 			return render_template('obj_result_student.html', tests=studentResults)
 		elif callresults['test_type'] == "subjective":
 			cur = mysql.connection.cursor()
 			studentResults = cur.execute('select SUM(longtest.marks) as marks, longtest.test_id as test_id, teachers.subject as subject, teachers.topic as topic from longtest,teachers,studenttestinfo where longtest.email = ? and longtest.test_id = ? and longtest.test_id=teachers.test_id and studenttestinfo.test_id=teachers.test_id and longtest.email = studenttestinfo.email and studenttestinfo.completed = 1 and teachers.show_ans=1 group by longtest.test_id', (email, tidoption))
-			studentResults = cur.fetchall()
+			studentRows = cur.fetchall()
+			if not studentRows:
+				cur.execute('select SUM(longtest.marks) as marks, longtest.test_id as test_id, teachers.subject as subject, teachers.topic as topic from longtest,teachers where lower(trim(longtest.email)) = lower(trim(?)) and longtest.test_id = ? and longtest.test_id=teachers.test_id group by longtest.test_id', (email, tidoption))
+				studentRows = cur.fetchall()
 			cur.close()
-			return render_template('sub_result_student.html', tests=studentResults)
+			return render_template('sub_result_student.html', tests=studentRows)
 		elif callresults['test_type'] == "practical":
 			cur = mysql.connection.cursor()
 			studentResults = cur.execute('select SUM(practicaltest.marks) as marks, practicaltest.test_id as test_id, teachers.subject as subject, teachers.topic as topic from practicaltest,teachers,studenttestinfo where practicaltest.email = ? and practicaltest.test_id = ? and practicaltest.test_id=teachers.test_id and studenttestinfo.test_id=teachers.test_id and practicaltest.email = studenttestinfo.email and studenttestinfo.completed = 1 and teachers.show_ans=1 group by practicaltest.test_id', (email, tidoption))
-			studentResults = cur.fetchall()
+			studentRows = cur.fetchall()
+			if not studentRows:
+				cur.execute('select SUM(practicaltest.marks) as marks, practicaltest.test_id as test_id, teachers.subject as subject, teachers.topic as topic from practicaltest,teachers where lower(trim(practicaltest.email)) = lower(trim(?)) and practicaltest.test_id = ? and practicaltest.test_id=teachers.test_id group by practicaltest.test_id', (email, tidoption))
+				studentRows = cur.fetchall()
 			cur.close()
-			return render_template('prac_result_student.html', tests=studentResults)
+			return render_template('prac_result_student.html', tests=studentRows)
+		flash('Unsupported test type', 'danger')
+		return redirect(url_for('tests_given', email=session['email']))
 	else:
 		flash('You are not authorized', 'danger')
 		return redirect(url_for('student_index'))
@@ -2099,8 +2323,11 @@ def tests_created(email):
 	if email == session['email']:
 		cur = mysql.connection.cursor()
 		results = cur.execute('select * from teachers where email = ? and uid = ? and show_ans = 1', (email,session['uid']))
-		results = cur.fetchall()
-		return render_template('tests_created.html', tests=results)
+		rows = cur.fetchall()
+		if not rows:
+			cur.execute('select * from teachers where email = ? and show_ans = 1', (email,))
+			rows = cur.fetchall()
+		return render_template('tests_created.html', tests=rows)
 	else:
 		flash('You are not authorized', 'danger')
 		return redirect(url_for('professor_index'))
@@ -2108,49 +2335,78 @@ def tests_created(email):
 @app.route('/<email>/tests-created/<testid>', methods = ['POST','GET'])
 @user_role_professor
 def student_results(email, testid):
-	if email == session['email']:
-		et = examtypecheck(testid)
-		if request.method =='GET':
-			if et['test_type'] == "objective":
-				cur = mysql.connection.cursor()
-				results = cur.execute('select users.name as name,users.email as email, studentTestInfo.test_id as test_id from studentTestInfo, users where test_id = ? and completed = 1 and  users.user_type = ? and studentTestInfo.email=users.email ', (testid,'student'))
-				results = cur.fetchall()
-				cur.close()
-				final = []
-				names = []
-				scores = []
-				count = 1
-				for user in results:
-					score = marks_calc(user['email'], user['test_id'])
-					user['srno'] = count
-					user['marks'] = score
-					final.append([count, user['name'], score])
-					names.append(user['name'])
-					scores.append(score)
-					count+=1
-				return render_template('student_results.html', data=final, labels=names, values=scores)
-			elif et['test_type'] == "subjective":
-				cur = mysql.connection.cursor()
-				results = cur.execute('select users.name as name,users.email as email, longtest.test_id as test_id, SUM(longtest.marks) AS marks from longtest, users where longtest.test_id = ?  and  users.user_type = ? and longtest.email=users.email', (testid,'student'))
-				results = cur.fetchall()
-				cur.close()
-				names = []
-				scores = []
-				for user in results:
-					names.append(user['name'])
-					scores.append(user['marks'])
-				return render_template('student_results_lqa.html', data=results, labels=names, values=scores)
-			elif et['test_type'] == "practical":
-				cur = mysql.connection.cursor()
-				results = cur.execute('select users.name as name,users.email as email, practicaltest.test_id as test_id, SUM(practicaltest.marks) AS marks from practicaltest, users where practicaltest.test_id = ?  and  users.user_type = ? and practicaltest.email=users.email', (testid,'student'))
-				results = cur.fetchall()
-				cur.close()
-				names = []
-				scores = []
-				for user in results:
-					names.append(user['name'])
-					scores.append(user['marks'])
-				return render_template('student_results_pqa.html', data=results, labels=names, values=scores)
+	if email != session['email']:
+		flash('You are not authorized', 'danger')
+		return redirect(url_for('professor_index'))
+
+	# Resolve teacher row by normalized test_id + email to avoid uid mismatch issues.
+	cur = mysql.connection.cursor()
+	cur.execute(
+		'SELECT test_id, test_type FROM teachers WHERE lower(trim(email)) = lower(trim(?))',
+		(session['email'],)
+	)
+	teacher_rows = cur.fetchall()
+	cur.close()
+
+	et = None
+	input_norm = normalize_test_id(testid)
+	for row in teacher_rows:
+		if normalize_test_id(row['test_id']) == input_norm:
+			testid = row['test_id']
+			et = {'test_type': row['test_type']}
+			break
+
+	if not et or 'test_type' not in et or not et['test_type']:
+		flash('Invalid test id', 'danger')
+		return redirect(url_for('tests_created', email=session['email']))
+
+	if request.method != 'GET':
+		return redirect(url_for('tests_created', email=session['email']))
+
+	if et['test_type'] == "objective":
+		cur = mysql.connection.cursor()
+		results = cur.execute('select users.name as name,users.email as email, studentTestInfo.test_id as test_id from studentTestInfo, users where test_id = ? and completed = 1 and  users.user_type = ? and studentTestInfo.email=users.email ', (testid,'student'))
+		rows = cur.fetchall()
+		if not rows:
+			cur.execute('select distinct users.name as name,users.email as email, students.test_id as test_id from students, users where students.test_id = ? and users.user_type = ? and students.email=users.email', (testid, 'student'))
+			rows = cur.fetchall()
+		cur.close()
+		final = []
+		names = []
+		scores = []
+		count = 1
+		for user in rows:
+			score = marks_calc(user['email'], user['test_id'])
+			final.append([count, user['name'], score])
+			names.append(user['name'])
+			scores.append(score)
+			count+=1
+		return render_template('student_results.html', data=final, labels=names, values=scores)
+	elif et['test_type'] == "subjective":
+		cur = mysql.connection.cursor()
+		results = cur.execute('select users.name as name,users.email as email, longtest.test_id as test_id, SUM(longtest.marks) AS marks from longtest, users where longtest.test_id = ?  and  users.user_type = ? and longtest.email=users.email', (testid,'student'))
+		results = cur.fetchall()
+		cur.close()
+		names = []
+		scores = []
+		for user in results:
+			names.append(user['name'])
+			scores.append(user['marks'])
+		return render_template('student_results_lqa.html', data=results, labels=names, values=scores)
+	elif et['test_type'] == "practical":
+		cur = mysql.connection.cursor()
+		results = cur.execute('select users.name as name,users.email as email, practicaltest.test_id as test_id, SUM(practicaltest.marks) AS marks from practicaltest, users where practicaltest.test_id = ?  and  users.user_type = ? and practicaltest.email=users.email', (testid,'student'))
+		results = cur.fetchall()
+		cur.close()
+		names = []
+		scores = []
+		for user in results:
+			names.append(user['name'])
+			scores.append(user['marks'])
+		return render_template('student_results_pqa.html', data=results, labels=names, values=scores)
+
+	flash('Invalid test type', 'danger')
+	return redirect(url_for('tests_created', email=session['email']))
 
 @app.route('/<email>/disptests')
 @user_role_professor
@@ -2169,9 +2425,20 @@ def disptests(email):
 def student_test_history(email):
 	if email == session['email']:
 		cur = mysql.connection.cursor()
-		results = cur.execute('SELECT a.test_id, b.subject, b.topic \
-			from studenttestinfo a, teachers b where a.test_id = b.test_id and a.email=?  \
-			and a.completed=1', [email])
+		results = cur.execute(
+			'SELECT DISTINCT x.test_id, t.subject, t.topic \
+			FROM teachers t \
+			INNER JOIN ( \
+				SELECT test_id FROM studenttestinfo WHERE lower(trim(email)) = lower(trim(?)) AND completed = 1 \
+				UNION \
+				SELECT test_id FROM students WHERE lower(trim(email)) = lower(trim(?)) \
+				UNION \
+				SELECT test_id FROM longtest WHERE lower(trim(email)) = lower(trim(?)) \
+				UNION \
+				SELECT test_id FROM practicaltest WHERE lower(trim(email)) = lower(trim(?)) \
+			) x ON x.test_id = t.test_id',
+			(email, email, email, email)
+		)
 		results = cur.fetchall()
 		return render_template('student_test_history.html', tests=results)
 	else:
@@ -2185,6 +2452,19 @@ def test_generate():
 		inputText = request.form["itext"]
 		testType = request.form["test_type"]
 		noOfQues = request.form["noq"]
+		# Speed guardrails to keep generation under ~40s in typical cases.
+		max_chars = 2000
+		max_questions = 10
+		if len(inputText) > max_chars:
+			inputText = inputText[:max_chars]
+			flash(f'Input text trimmed to {max_chars} characters for faster generation.', 'warning')
+		try:
+			noOfQues = int(noOfQues)
+		except Exception:
+			noOfQues = 5
+		if noOfQues > max_questions:
+			noOfQues = max_questions
+			flash(f'Questions capped at {max_questions} for faster generation.', 'warning')
 		if testType == "objective":
 			try:
 				objective_generator = ObjectiveTest(inputText,noOfQues)
